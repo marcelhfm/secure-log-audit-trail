@@ -1,49 +1,55 @@
-/*
- * SPDX-FileCopyrightText: 2010-2022 Espressif Systems (Shanghai) CO LTD
- *
- * SPDX-License-Identifier: CC0-1.0
- */
-
-#include "esp_chip_info.h"
-#include "esp_flash.h"
+#include "esp_err.h"
+#include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "log_secure.h"
-#include "sdkconfig.h"
+#include "nvs_flash.h"
+#include "ringbuf_flash.h"
 #include <inttypes.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <string.h>
+
+const char *main_tag = "main";
 
 void app_main(void) {
-  printf("Hello world!\n");
+  nvs_flash_init();
 
-  /* Print chip information */
-  esp_chip_info_t chip_info;
-  uint32_t flash_size;
-  esp_chip_info(&chip_info);
-  printf("This is %s chip with %d CPU core(s), %s%s%s%s, ", CONFIG_IDF_TARGET,
-         chip_info.cores,
-         (chip_info.features & CHIP_FEATURE_WIFI_BGN) ? "WiFi/" : "",
-         (chip_info.features & CHIP_FEATURE_BT) ? "BT" : "",
-         (chip_info.features & CHIP_FEATURE_BLE) ? "BLE" : "",
-         (chip_info.features & CHIP_FEATURE_IEEE802154)
-             ? ", 802.15.4 (Zigbee/Thread)"
-             : "");
-
-  unsigned major_rev = chip_info.revision / 100;
-  unsigned minor_rev = chip_info.revision % 100;
-  printf("silicon revision v%d.%d, ", major_rev, minor_rev);
-  if (esp_flash_get_size(NULL, &flash_size) != ESP_OK) {
-    printf("Get flash size failed");
-    return;
+  ringbuf_flash_t rb;
+  esp_err_t err = ringbuf_flash_init(&rb, "log_plain");
+  if (err != ESP_OK) {
+    ESP_LOGE(main_tag, "Flash init failed with %s", esp_err_to_name(err));
+    vTaskDelay(10000 / portTICK_PERIOD_MS);
+    esp_restart();
   }
 
-  printf("%" PRIu32 "MB %s flash\n", flash_size / (uint32_t)(1024 * 1024),
-         (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded"
-                                                       : "external");
+  const char *msgs[] = {"foo", "longer test message", "1234567890"};
+  for (int i = 0; i < 3; i++) {
+    err = ringbuf_flash_write(&rb, msgs[i], strlen(msgs[i]));
+    if (err != ESP_OK) {
+      ESP_LOGE(main_tag, "Flash write failed with %s", esp_err_to_name(err));
+      break;
+    }
+  }
 
-  printf("Minimum free heap size: %" PRIu32 " bytes\n",
-         esp_get_minimum_free_heap_size());
+  uint8_t buf[256];
+  size_t rec_len;
+  while (!ringbuf_flash_empty(&rb)) {
+    if (ringbuf_flash_read_record(&rb, buf, sizeof(buf), &rec_len) == ESP_OK) {
+      ESP_LOGI(main_tag, "Read Record (length=%zu): '%.*s'", rec_len,
+               (int)rec_len, buf);
+    }
+  }
+
+  char dump[256];
+  size_t len;
+  err = ringbuf_flash_dump(&rb, dump, sizeof(dump), &len);
+  if (err != ESP_OK) {
+    ESP_LOGE(main_tag, "Flash read failed with %s", esp_err_to_name(err));
+    vTaskDelay(10000 / portTICK_PERIOD_MS);
+  }
+  ESP_LOGI(main_tag, "DUMP(%zu): '%.*s'", len, (int)len, dump);
 
   for (int i = 10; i >= 0; i--) {
     printf("Restarting in %d seconds...\n", i);
