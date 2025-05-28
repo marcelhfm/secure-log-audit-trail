@@ -1,60 +1,58 @@
 #include "log_plain.h"
 #include "esp_err.h"
-#include "esp_partition.h"
+#include "esp_log.h"
 #include "ringbuf_flash.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
-/*
-static const esp_partition_t *s_plain_part;
-static ring_buffer_t *s_plain_rb;
-static const void *s_plain_map;
+static const char *plain_tag = "log_plain";
+static ringbuf_flash_t rb;
 
-esp_err_t log_plain_init(void) {
-  // find partition by label
-  s_plain_part = esp_partition_find_first(
-      ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "log_plain");
-  if (!s_plain_part) {
-    return ESP_ERR_NOT_FOUND;
-  }
-
-  // memory map entire region for easy read/write
-  esp_err_t err =
-      esp_partition_mmap(s_plain_part, 0, s_plain_part->size,
-                         ESP_PARTITION_MMAP_DATA, &s_plain_map, NULL);
+esp_err_t log_plain_init() {
+  esp_err_t err = ringbuf_flash_init(&rb, "log_plain");
   if (err != ESP_OK) {
     return err;
   }
 
-  // TODO:
-  // recover saved head/tail pointers from log_meta
-  // read values from log_meta area
-
-  // init ring buffer over the flash window
-  s_plain_rb = ring_buffer_init((void *)s_plain_map, s_plain_part->size);
-  if (!s_plain_rb) {
-    return ESP_ERR_NO_MEM;
-  }
-
   return ESP_OK;
 }
 
-esp_err_t log_plain(const void *data, size_t len) {
-  if (!s_plain_rb) {
-    return ESP_ERR_INVALID_STATE;
+esp_err_t log_plain(const char *tag, const char *fmt, ...) {
+  char buf[256];
+  int off = snprintf(buf, sizeof(buf),
+                     "%10" PRIu32 " [%s]: ", esp_log_timestamp(), tag);
+
+  if (off < 0 || off >= sizeof(buf)) {
+    return ESP_ERR_INVALID_ARG;
   }
 
-  ring_buffer_write(s_plain_rb, data, len);
+  va_list ap;
+  va_start(ap, fmt);
+  int len = vsnprintf(buf + off, sizeof(buf) - off, fmt, ap);
+  va_end(ap);
 
-  return ESP_OK;
-}
-
-esp_err_t log_plain_read(uint8_t *dst, size_t len, size_t *out_read) {
-  if (!s_plain_rb) {
-    return ESP_ERR_INVALID_STATE;
+  if (len < 0) {
+    return ESP_ERR_INVALID_ARG;
   }
 
-  *out_read = ring_buffer_read(s_plain_rb, dst, len);
-  return ESP_OK;
+  size_t total = off + len;
+  if (total + 1 > sizeof(buf)) {
+    total = sizeof(buf) - 1;
+  }
+
+  buf[total++] = '\n';
+  return ringbuf_flash_write(&rb, buf, total);
+};
+
+void log_plain_uart_dump() {
+  uint8_t buf[256];
+  size_t rec_len;
+  while (!ringbuf_flash_empty(&rb)) {
+    if (ringbuf_flash_read_record(&rb, buf, sizeof(buf), &rec_len) == ESP_OK) {
+      // TODO: Send over uart
+      ESP_LOGI(plain_tag, "Read Log (length=%zu): '%.*s'", rec_len,
+               (int)rec_len, buf);
+    }
+  }
 }
-*/
