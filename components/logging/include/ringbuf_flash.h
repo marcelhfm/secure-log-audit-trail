@@ -40,6 +40,8 @@ esp_err_t ringbuf_flash_dump(ringbuf_flash_t *rb, void *out_buf,
 esp_err_t ringbuf_flash_read_record(ringbuf_flash_t *rb, void *out_buf,
                                     size_t buf_size, size_t *out_len);
 
+esp_err_t reset_meta(ringbuf_flash_t *rb);
+
 static inline bool ringbuf_flash_empty(const ringbuf_flash_t *rb) {
   return rb->meta.head == rb->meta.tail;
 }

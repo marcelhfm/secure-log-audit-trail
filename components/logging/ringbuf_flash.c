@@ -16,6 +16,7 @@
 static const char *rb_tag = "ringbuf_flash";
 
 static esp_err_t save_meta(ringbuf_flash_t *rb, const rb_meta_t *m) {
+  ESP_LOGD(rb_tag, "Saving ringbuf metadata...");
   nvs_handle_t h;
   ESP_ERROR_CHECK(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h));
 
@@ -30,6 +31,22 @@ static esp_err_t save_meta(ringbuf_flash_t *rb, const rb_meta_t *m) {
   }
   nvs_close(h);
   return err;
+}
+
+esp_err_t reset_meta(ringbuf_flash_t *rb) {
+  ESP_LOGD(rb_tag, "load_meta: deemed this the first load, intializing meta "
+                   "and erasing flash partition");
+  // treat as fresh
+  rb_meta_t m;
+  m.head = 0;
+  m.tail = 0;
+  m.cycle = 0;
+  m.version = META_VERSION;
+  m.crc32 = 0;
+
+  // erase partition once
+  ESP_ERROR_CHECK(esp_partition_erase_range(rb->part, 0, rb->part->size));
+  return save_meta(rb, &m);
 }
 
 static esp_err_t load_meta(ringbuf_flash_t *rb, rb_meta_t *m) {
@@ -52,12 +69,17 @@ static esp_err_t load_meta(ringbuf_flash_t *rb, rb_meta_t *m) {
         err = ESP_ERR_INVALID_CRC;
       }
     }
+
+    ESP_LOGD(rb_tag, "load_meta: successfully loaded meta. version=%" PRIu32,
+             m->version);
   }
 
   nvs_close(h);
 
   if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_INVALID_VERSION ||
       err == ESP_ERR_INVALID_CRC) {
+    ESP_LOGD(rb_tag, "load_meta: deemed this the first load, intializing meta "
+                     "and erasing flash partition");
     // treat as fresh
     m->head = 0;
     m->tail = 0;
@@ -73,6 +95,37 @@ static esp_err_t load_meta(ringbuf_flash_t *rb, rb_meta_t *m) {
   return err;
 }
 
+/*static esp_err_t load_meta(ringbuf_flash_t *rb, rb_meta_t *m) {*/
+/*  nvs_handle_t h;*/
+/*  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);*/
+/*  if (err != ESP_OK) {*/
+/*    return err;*/
+/*  }*/
+/**/
+/*  size_t len = sizeof(*m);*/
+/*  err = nvs_get_blob(h, rb->label, m, &len);*/
+/**/
+/*  ESP_LOGD(*/
+/*      rb_tag,*/
+/*      "load_meta: deemed this the first load, intializing meta and erasing "*/
+/*      "flash partition");*/
+/**/
+/*  // treat as fresh*/
+/*  m->head = 0;*/
+/*  m->tail = 0;*/
+/*  m->cycle = 0;*/
+/*  m->version = META_VERSION;*/
+/*  m->crc32 = 0;*/
+/**/
+/*  // erase partition once*/
+/*  ESP_ERROR_CHECK(esp_partition_erase_range(rb->part, 0, rb->part->size));*/
+/*  return save_meta(rb, m);*/
+/**/
+/*  nvs_close(h);*/
+/**/
+/*  return err;*/
+/*}*/
+
 esp_err_t ringbuf_flash_init(ringbuf_flash_t *rb, const char *partition_label) {
   // find partition
   rb->part = esp_partition_find_first(
@@ -80,7 +133,7 @@ esp_err_t ringbuf_flash_init(ringbuf_flash_t *rb, const char *partition_label) {
   if (!rb->part) {
     return ESP_ERR_NOT_FOUND;
   }
-  ESP_LOGI(rb_tag, "partition find successful. label=%s", partition_label);
+  ESP_LOGD(rb_tag, "partition find successful. label=%s", partition_label);
 
   rb->label = partition_label;
 
@@ -95,33 +148,29 @@ esp_err_t ringbuf_flash_init(ringbuf_flash_t *rb, const char *partition_label) {
     return err;
   }
 
-  // on first boot erase everything
-  err = esp_partition_erase_range(rb->part, 0, rb->part->size);
-  if (err != ESP_OK) {
-    ESP_LOGE(rb_tag, "error while erasing whole partition. err=%s",
-             esp_err_to_name(err));
-    return err;
-  }
-
   return ESP_OK;
 }
 
 esp_err_t ringbuf_flash_write(ringbuf_flash_t *rb, const void *data,
                               size_t len) {
   xSemaphoreTake(rb->lock, portMAX_DELAY);
-
-  if (len > rb->part->size) {
-    xSemaphoreGive(rb->lock);
-    ESP_LOGE(
-        rb_tag,
-        "write: data too long for partition. len=%zu partition_len=%" PRIu32,
-        len, rb->part->size);
-    return ESP_ERR_INVALID_SIZE;
-  }
+  ESP_LOGD(rb_tag, "ringbuf_flash_write writing log...");
 
   // build header
   rbf_rec_hdr_t hdr = {
       .magic = RBF_MAGIC, .len = len, .crc = esp_crc32_le(0, data, len)};
+
+  size_t record_size = sizeof(hdr) + len;
+  if (rb->meta.head + record_size > rb->part->size) {
+    // wrap and erase
+    rb->meta.head = 0;
+    rb->meta.cycle++;
+    // TODO: Only erase next sector
+    ESP_LOGD(
+        rb_tag,
+        "ringbuf_flash_write wrapping around. deleting flash partition...");
+    ESP_ERROR_CHECK(esp_partition_erase_range(rb->part, 0, rb->part->size));
+  }
 
   // write header
   esp_err_t err =
@@ -144,13 +193,8 @@ esp_err_t ringbuf_flash_write(ringbuf_flash_t *rb, const void *data,
   // advance head
   rb->meta.head += sizeof(hdr) + len;
 
-  // wrap around
-  if (rb->meta.head >= rb->part->size) {
-    rb->meta.head = 0;
-    rb->meta.cycle++;
-
-    // TODO: Erase part->erase_size of section
-  }
+  ESP_LOGD(rb_tag, "WRITING hdr @ offset=%" PRIu32 " len=%zu crc=0x%" PRIu32,
+           rb->meta.head, len, hdr.crc);
 
   save_meta(rb, &rb->meta);
 

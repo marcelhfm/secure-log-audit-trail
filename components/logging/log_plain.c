@@ -42,10 +42,17 @@ esp_err_t log_plain(const char *tag, const char *fmt, ...) {
   }
 
   buf[total++] = '\n';
-  return ringbuf_flash_write(&rb, buf, total);
+  esp_err_t err = ringbuf_flash_write(&rb, buf, total);
+  if (err != ESP_OK) {
+    ESP_LOGE(plain_tag, "Error writing logs. Resetting metadata.");
+    ESP_ERROR_CHECK(reset_meta(&rb));
+  }
+
+  return err;
 };
 
 void log_plain_uart_dump() {
+  ESP_LOGD(plain_tag, "dumping logs...");
   uint8_t buf[256];
   size_t rec_len;
   while (!ringbuf_flash_empty(&rb)) {
@@ -53,6 +60,10 @@ void log_plain_uart_dump() {
       // TODO: Send over uart
       ESP_LOGI(plain_tag, "Read Log (length=%zu): '%.*s'", rec_len,
                (int)rec_len, buf);
+    } else {
+      ESP_LOGE(plain_tag, "Error dumping logs. Resetting metadata.");
+      ESP_ERROR_CHECK(reset_meta(&rb));
+      return;
     }
   }
 }

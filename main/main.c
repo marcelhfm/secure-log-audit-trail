@@ -15,6 +15,7 @@ const char *main_tag = "main";
 
 void app_main(void) {
   nvs_flash_init();
+
   esp_err_t err = log_plain_init();
   if (err != ESP_OK) {
     ESP_LOGE(main_tag, "could not initialize log_plain err=%s",
@@ -23,14 +24,14 @@ void app_main(void) {
     esp_restart();
   }
 
-  log_plain_uart_dump();
-
   for (int i = 10; i >= 0; i--) {
     log_plain(main_tag, "Restarting in %d seconds...", i);
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 
   log_plain(main_tag, "Restarting now.");
+
+  log_plain_uart_dump();
 
   fflush(stdout);
   esp_restart();
