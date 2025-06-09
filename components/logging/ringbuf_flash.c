@@ -95,37 +95,6 @@ static esp_err_t load_meta(ringbuf_flash_t *rb, rb_meta_t *m) {
   return err;
 }
 
-/*static esp_err_t load_meta(ringbuf_flash_t *rb, rb_meta_t *m) {*/
-/*  nvs_handle_t h;*/
-/*  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);*/
-/*  if (err != ESP_OK) {*/
-/*    return err;*/
-/*  }*/
-/**/
-/*  size_t len = sizeof(*m);*/
-/*  err = nvs_get_blob(h, rb->label, m, &len);*/
-/**/
-/*  ESP_LOGD(*/
-/*      rb_tag,*/
-/*      "load_meta: deemed this the first load, intializing meta and erasing "*/
-/*      "flash partition");*/
-/**/
-/*  // treat as fresh*/
-/*  m->head = 0;*/
-/*  m->tail = 0;*/
-/*  m->cycle = 0;*/
-/*  m->version = META_VERSION;*/
-/*  m->crc32 = 0;*/
-/**/
-/*  // erase partition once*/
-/*  ESP_ERROR_CHECK(esp_partition_erase_range(rb->part, 0, rb->part->size));*/
-/*  return save_meta(rb, m);*/
-/**/
-/*  nvs_close(h);*/
-/**/
-/*  return err;*/
-/*}*/
-
 esp_err_t ringbuf_flash_init(ringbuf_flash_t *rb, const char *partition_label) {
   // find partition
   rb->part = esp_partition_find_first(
