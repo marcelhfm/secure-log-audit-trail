@@ -1,4 +1,6 @@
 build
+.cache
+.ipynb_checkpoints
 
 # Prerequisites
 *.d
