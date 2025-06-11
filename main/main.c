@@ -22,6 +22,24 @@ void handle_command(const char *cmd) {
   } else if (strcmp(cmd, "ping") == 0) {
     const char *resp = "ping:pong\n";
     usb_serial_jtag_write_bytes(resp, strlen(resp), pdMS_TO_TICKS(10000));
+  } else if (strcmp(cmd, "reset") == 0) {
+    esp_err_t err = log_secure_reset();
+
+    const char *resp = "reset:ok";
+    if (err != ESP_OK) {
+      ESP_LOGE(main_tag, "error resetting audit log. err=%s",
+               esp_err_to_name(err));
+
+      resp = "reset:fail";
+    }
+    usb_serial_jtag_write_bytes(resp, strlen(resp), pdMS_TO_TICKS(10000));
+  } else if (strcmp(cmd, "get_key") == 0) {
+    esp_err_t err = log_secure_get_key();
+    if (err != ESP_OK) {
+      ESP_LOGE(main_tag, "error retrieving key. err=%s", esp_err_to_name(err));
+      const char *resp = "get_key:fail\n";
+      usb_serial_jtag_write_bytes(resp, strlen(resp), pdMS_TO_TICKS(10000));
+    }
   } else {
     ESP_LOGW(main_tag, "unknown command. cmd=%s", cmd);
   }

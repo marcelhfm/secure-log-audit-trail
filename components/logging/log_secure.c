@@ -16,6 +16,7 @@
 #define AEAD_KEY_SIZE 32
 #define AEAD_NONCE_SIZE 12
 #define AEAD_TAG_SIZE 16
+#define FIRST_BOOT_MAGIC 0xdead
 
 static const char *sec_tag = "log_secure";
 
@@ -57,13 +58,14 @@ esp_err_t log_secure_init() {
   return err;
 }
 
-esp_err_t reset_log_secure(ringbuf_flash_t *rb) {
-  ESP_ERROR_CHECK(reset_meta(rb));
+esp_err_t log_secure_reset() {
+  ESP_ERROR_CHECK(reset_meta(&rb));
 
   nvs_handle_t h;
 
   ESP_ERROR_CHECK(nvs_open(SEC_NAMESPACE, NVS_READWRITE, &h));
   ESP_ERROR_CHECK(nvs_erase_key(h, "meta"));
+  ESP_ERROR_CHECK(nvs_erase_key(h, "key_fetched"));
   ESP_ERROR_CHECK(nvs_commit(h));
   nvs_close(h);
   // 3) re-init both ringbuf and sec_meta
@@ -140,7 +142,7 @@ esp_err_t log_secure(const char *tag, const char *fmt, ...) {
   if (err != ESP_OK) {
     ESP_LOGE(sec_tag, "flash write failed (%s), resetting meta",
              esp_err_to_name(err));
-    ESP_ERROR_CHECK(reset_log_secure(&rb));
+    ESP_ERROR_CHECK(log_secure_reset());
     return err;
   }
 
@@ -155,6 +157,34 @@ esp_err_t log_secure(const char *tag, const char *fmt, ...) {
   return ESP_OK;
 };
 
+void send_hexbytes_over_uart(const char *hdr, size_t hdr_len, uint8_t *data,
+                             size_t data_len) {
+  char hexbuf[data_len * 2 + 1];
+
+  // hex-encode the binary record
+  for (size_t i = 0; i < data_len; ++i) {
+    // each byte → two hex chars
+    sprintf(&hexbuf[2 * i], "%02X", data[i]);
+  }
+  // append newline
+  hexbuf[2 * data_len] = '\n';
+
+  // send ASCII header + newline
+  int ret = usb_serial_jtag_write_bytes(hdr, hdr_len, pdMS_TO_TICKS(1000));
+  if (ret < 0) {
+    ESP_LOGE(sec_tag, "error writing header over UART. ret=%d", ret);
+    return;
+  }
+
+  // send the hex string
+  ret = usb_serial_jtag_write_bytes(hexbuf, 2 * data_len + 1,
+                                    pdMS_TO_TICKS(10000));
+  if (ret < 0) {
+    ESP_LOGE(sec_tag, "error writing hex record over UART. ret=%d", ret);
+    return;
+  }
+}
+
 void log_secure_uart_dump() {
   ESP_LOGD(sec_tag, "dumping secure logs...");
   uint8_t record[272];
@@ -163,40 +193,15 @@ void log_secure_uart_dump() {
   const char *hdr = "log_dump:";
   size_t hdr_len = strlen(hdr);
 
-  // hex buffer: two ASCII chars per byte, plus one newline
-  // Worst case: 2*MAX_RECORD_LEN chars + '\n'
-  char hexbuf[2 * 272 + 1];
-
   while (!ringbuf_flash_empty(&rb)) {
     if (ringbuf_flash_read_record(&rb, record, sizeof(record), &rec_len) !=
         ESP_OK) {
       ESP_LOGE(sec_tag, "Error dumping logs. Resetting metadata.");
-      ESP_ERROR_CHECK(reset_log_secure(&rb));
+      ESP_ERROR_CHECK(log_secure_reset());
       return;
     }
 
-    // send ASCII header + newline
-    int ret = usb_serial_jtag_write_bytes(hdr, hdr_len, pdMS_TO_TICKS(1000));
-    if (ret < 0) {
-      ESP_LOGE(sec_tag, "error writing header over UART. ret=%d", ret);
-      return;
-    }
-
-    // hex-encode the binary record
-    for (size_t i = 0; i < rec_len; ++i) {
-      // each byte → two hex chars
-      sprintf(&hexbuf[2 * i], "%02X", record[i]);
-    }
-    // append newline
-    hexbuf[2 * rec_len] = '\n';
-
-    // send the hex string
-    ret = usb_serial_jtag_write_bytes(hexbuf, 2 * rec_len + 1,
-                                      pdMS_TO_TICKS(10000));
-    if (ret < 0) {
-      ESP_LOGE(sec_tag, "error writing hex record over UART. ret=%d", ret);
-      return;
-    }
+    send_hexbytes_over_uart(hdr, hdr_len, record, rec_len);
   }
 
   const char *footer = "log_dump_end:";
@@ -207,4 +212,47 @@ void log_secure_uart_dump() {
     ESP_LOGE(sec_tag, "error writing footer over UART. ret=%d", ret);
     return;
   }
+}
+
+esp_err_t log_secure_get_key() {
+  const char *hdr = "get_key:";
+  size_t hdr_len = strlen(hdr);
+
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(SEC_NAMESPACE, NVS_READWRITE, &h);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  uint16_t magic = 0;
+  size_t magic_len = sizeof(magic);
+
+  err = nvs_get_blob(h, "key_fetched", &magic, &magic_len);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    // key has not been fetched yet by verifier
+    magic = FIRST_BOOT_MAGIC;
+
+    // set the blob
+    err = nvs_set_blob(h, "key_fetched", &magic, magic_len);
+    if (err == ESP_OK) {
+      ESP_ERROR_CHECK(nvs_commit(h));
+    }
+
+    // send key over uart
+    send_hexbytes_over_uart(hdr, hdr_len, sec_meta.key, AEAD_KEY_SIZE);
+  }
+
+  nvs_close(h);
+
+  // key has been fetched previously already, send fail over uart
+  const char *fail = "get_key:fail";
+  size_t fail_len = strlen(fail);
+
+  int ret = usb_serial_jtag_write_bytes(fail, fail_len, pdMS_TO_TICKS(1000));
+  if (ret < 0) {
+    ESP_LOGE(sec_tag, "error writing header over UART. ret=%d", ret);
+    return ESP_ERR_NOT_FINISHED;
+  }
+
+  return ESP_OK;
 }
